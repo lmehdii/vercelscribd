@@ -71,7 +71,7 @@ module.exports = async (req, res) => {
         console.log(`[API] Generated ilide.info link: ${ilideLink}`);
 
         // 2. Define the Puppeteer script string using V2 ESM syntax
-        // (Same script as the last working V2 version)
+        // **** Corrected the wait mechanism ****
         const puppeteerScriptV2 = `
             export default async function ({ page, context }) {
                 const { ilideLink } = context;
@@ -100,7 +100,10 @@ module.exports = async (req, res) => {
                     console.log('[Browserless V2] Navigating to:', ilideLink);
                     await page.goto(ilideLink, { waitUntil: 'networkidle0', timeout: 60000 });
                     console.log('[Browserless V2] Navigation complete.');
-                    await page.waitForTimeout(5000);
+
+                    // **** Use standard Promise/setTimeout for delay ****
+                    console.log('[Browserless V2] Waiting for 5 seconds...');
+                    await new Promise(resolve => setTimeout(resolve, 5000));
                     console.log('[Browserless V2] Extra wait finished.');
 
                     if (capturedLink) {
@@ -124,8 +127,8 @@ module.exports = async (req, res) => {
         };
 
         // 4. Call the Browserless.io V2 /function endpoint
-        //    Using fetch from node-fetch
-        const browserlessUrl = `https://production-sfo.browserless.io/function?token=${apiKey}&timeout=50000`;
+        // Use corrected timeout value
+        const browserlessUrl = `https://production-sfo.browserless.io/function?token=${apiKey}&timeout=60000`;
         console.log(`[API] Sending request to Browserless V2: ${browserlessUrl}`);
 
         const browserlessResponse = await fetch(browserlessUrl, {
@@ -143,9 +146,15 @@ module.exports = async (req, res) => {
             const errorBody = await browserlessResponse.text();
             console.error("[API] Browserless Error Body:", errorBody);
             let detail = errorBody;
-             try { detail = JSON.parse(errorBody).message || errorBody; } catch(e){}
+             try {
+                 // Check if Browserless returned JSON with error detail
+                 const errorJson = JSON.parse(errorBody);
+                 if (errorJson && errorJson.message) {
+                     detail = errorJson.message; // Use the specific message if available
+                 }
+             } catch(e){}
             // Send appropriate status code back to frontend
-             const statusCode = browserlessResponse.status === 401 || browserlessResponse.status === 403 ? 500 : 502; // 500 for key issue, 502 Bad Gateway otherwise
+             const statusCode = browserlessResponse.status === 401 || browserlessResponse.status === 403 ? 500 : 502;
             return res.status(statusCode).json({ error: `Browserless API Error (${browserlessResponse.status}): ${detail}` });
         }
 
