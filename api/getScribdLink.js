@@ -125,7 +125,7 @@ module.exports = async (req, res) => {
 
         // 4. Call the Browserless.io V2 /function endpoint
         //    Using fetch from node-fetch
-        const browserlessUrl = `https://production-sfo.browserless.io/function?token=${apiKey}&timeout=90000`;
+        const browserlessUrl = `https://production-sfo.browserless.io/function?token=${apiKey}&timeout=50000`;
         console.log(`[API] Sending request to Browserless V2: ${browserlessUrl}`);
 
         const browserlessResponse = await fetch(browserlessUrl, {
