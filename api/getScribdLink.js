@@ -1,30 +1,34 @@
-// Use node-fetch for compatibility with Vercel's Node.js runtime (v2 for CommonJS)
+// File: your-vercel-project/api/getScribdLink.js
+
+// Use node-fetch v2 for require() compatibility in Vercel Node runtime
 const fetch = require('node-fetch');
 
-// --- Helper Functions (Copied from previous attempts) ---
+// --- Helper Functions (with subdomain fix) ---
 
 function extractScribdInfo(url) {
-    if (!url || typeof url !== 'string') {
+     if (!url || typeof url !== 'string') {
         throw new Error('Invalid URL provided for extraction.');
     }
-    const regex = /scribd\.com\/(?:document|doc)\/(\d+)\/?([^?\/]+)?/;
+    // Regex with optional subdomain support
+    const regex = /(?:[a-z]{2,3}\.)?scribd\.com\/(?:document|doc)\/(\d+)\/?([^?\/]+)?/;
     const match = url.match(regex);
     if (match && match[1]) {
         const docId = match[1];
         const titleSlug = match[2] ? match[2].replace(/\/$/, '') : `document-${docId}`;
         const title = titleSlug.replace(/-/g, ' ');
+        console.log(`[Vercel Fn] Extracted via primary regex: ID=${docId}, Slug=${titleSlug}`);
         return { docId, title, titleSlug };
     } else {
-        // Try a more generic approach if the first regex fails
-        const genericMatch = url.match(/scribd\.com\/.*\/(?:document|doc|presentation|book)\/(\d+)/);
+        // Generic regex with optional subdomain support
+        const genericMatch = /(?:[a-z]{2,3}\.)?scribd\.com\/.*\/(?:document|doc|presentation|book)\/(\d+)/;
          if (genericMatch && genericMatch[1]) {
              const docId = genericMatch[1];
-             // Cannot reliably get title slug here, create a default one
              const titleSlug = `document-${docId}`;
              const title = `Document ${docId}`;
-             console.warn("Used generic Scribd URL matching.");
+             console.warn("[Vercel Fn] Used generic Scribd URL matching.");
              return { docId, title, titleSlug };
          } else {
+             console.error(`[Vercel Fn] Failed to match Scribd URL format: ${url}`);
             throw new Error('Invalid or unrecognized Scribd URL format.');
          }
     }
@@ -34,148 +38,158 @@ function generateIlideLink(docId, titleSlug) {
     const fileUrl = encodeURIComponent(`https://scribd.vdownloaders.com/pdownload/${docId}%2F${titleSlug}`);
     const titleWithSpaces = titleSlug.replace(/-/g, ' ');
     const encodedTitle = encodeURIComponent(`<div><p>${titleWithSpaces}</p></div>`);
-    // Ensure base URL is correct
     return `https://ilide.info/docgeneratev2?fileurl=${fileUrl}&title=${encodedTitle}&utm_source=scrfree&utm_medium=queue&utm_campaign=dl`;
 }
 
-
 // --- Vercel Serverless Function Handler ---
-
 module.exports = async (req, res) => {
     // Only allow POST requests
     if (req.method !== 'POST') {
         res.setHeader('Allow', ['POST']);
+        // Use Vercel's response method
         return res.status(405).json({ error: `Method ${req.method} Not Allowed` });
     }
 
-    // Get Browserless API Key from Vercel Environment Variables
+    // --- Environment Variables (from Vercel settings) ---
     const apiKey = process.env.BROWSERLESS_API_KEY;
+    const blockScripts = process.env.BLOCK_SCRIPTS === 'true';
+    const browserlessDomain = process.env.BROWSERLESS_DOMAIN || 'production-sfo.browserless.io';
+
     if (!apiKey) {
-        console.error("BROWSERLESS_API_KEY environment variable is not set.");
+        console.error("[Vercel Fn] BROWSERLESS_API_KEY environment variable is not set.");
         return res.status(500).json({ error: 'Server configuration error: Missing API Key.' });
     }
 
-    // Get scribdUrl from the request body sent by the frontend
+    // --- Request Body Parsing (Vercel usually parses JSON body automatically) ---
     const { scribdUrl } = req.body;
-    if (!scribdUrl) {
-        return res.status(400).json({ error: 'Missing scribdUrl in request body.' });
+    if (!scribdUrl || typeof scribdUrl !== 'string') {
+        console.error("[Vercel Fn] Invalid request body:", req.body);
+        return res.status(400).json({ error: 'Missing or invalid scribdUrl in request body.' });
     }
 
-    console.log(`[API] Received request for Scribd URL: ${scribdUrl}`);
+    console.log(`[Vercel Fn] Request for: ${scribdUrl}. Script Blocking: ${blockScripts}`);
 
     try {
-        // 1. Parse Scribd URL and generate ilide link
-        console.log("[API] Extracting Scribd info...");
+        // 1. Generate Links (Using updated extractScribdInfo)
+        console.log("[Vercel Fn] Extracting Scribd info...");
         const { docId, title, titleSlug } = extractScribdInfo(scribdUrl);
         const ilideLink = generateIlideLink(docId, titleSlug);
-        console.log(`[API] Generated ilide.info link: ${ilideLink}`);
+        console.log(`[Vercel Fn] Target ilide.info link: ${ilideLink}`);
 
-        // 2. Define the Puppeteer script string using V2 ESM syntax
-        // **** Corrected the wait mechanism ****
+        // 2. **** Optimized Puppeteer Script (with simplified logs) ****
         const puppeteerScriptV2 = `
             export default async function ({ page, context }) {
-                const { ilideLink } = context;
+                const { ilideLink, blockScripts } = context;
                 let capturedLink = null;
-                console.log('[Browserless V2] Received ilideLink:', ilideLink);
+                let navigationError = null;
+                console.log('B2: Script started. blockScripts=${blockScripts}. URL:', ilideLink);
 
-                page.on('response', async (response) => {
-                    const url = response.url();
-                    if (url.includes('viewer/web/viewer.html') && url.includes('file=')) {
-                        try {
-                            const urlObj = new URL(url);
-                            const fileParam = urlObj.searchParams.get('file');
-                            if (fileParam) {
-                                let decodedLink = decodeURIComponent(fileParam);
-                                try { decodedLink = decodeURIComponent(decodedLink); } catch(e){}
-                                capturedLink = decodedLink;
-                                console.log('[Browserless V2] Captured direct link:', capturedLink);
-                            }
-                        } catch (err) {
-                            console.error('[Browserless V2] Error parsing viewer URL:', err.message);
-                        }
+                // Request Interception
+                await page.setRequestInterception(true);
+                page.on('request', (request) => {
+                    const resourceType = request.resourceType();
+                    const blockList = ['image', 'stylesheet', 'font', 'media'];
+                    if (blockScripts && resourceType === 'script') {
+                         console.log('B2: Blocking Script:', request.url());
+                         request.abort();
+                    } else if (blockList.includes(resourceType)) {
+                        request.abort();
+                    } else {
+                        request.continue();
                     }
                 });
 
+                // Response Listener
+                page.on('response', async (response) => {
+                     const url = response.url();
+                     if (url.includes('viewer/web/viewer.html') && url.includes('file=')) {
+                        try {
+                             const urlObj = new URL(url); const fileParam = urlObj.searchParams.get('file');
+                             if (fileParam) { let decodedLink = decodeURIComponent(fileParam); try { decodedLink = decodeURIComponent(decodedLink); } catch(e){} capturedLink = decodedLink; console.log('B2: Captured target link:', capturedLink); }
+                        } catch (err) { console.error('B2: Error parsing viewer URL:', err.message); }
+                     }
+                });
+
+                // Navigation
                 try {
-                    console.log('[Browserless V2] Navigating to:', ilideLink);
-                    await page.goto(ilideLink, { waitUntil: 'networkidle0', timeout: 60000 });
-                    console.log('[Browserless V2] Navigation complete.');
+                    console.log('B2: Navigating (using domcontentloaded)...');
+                    await page.goto(ilideLink, { waitUntil: 'domcontentloaded', timeout: 55000 });
+                    console.log('B2: DOMContentLoaded fired.');
 
-                    // **** Use standard Promise/setTimeout for delay ****
-                    console.log('[Browserless V2] Waiting for 5 seconds...');
-                    await new Promise(resolve => setTimeout(resolve, 5000));
-                    console.log('[Browserless V2] Extra wait finished.');
+                    const postNavWait = blockScripts ? 500 : 1500;
+                    console.log(\`B2: Waiting \${postNavWait}ms post-DOM load...\`);
+                    await new Promise(resolve => setTimeout(resolve, postNavWait));
+                    console.log('B2: Post-DOM wait finished.');
 
-                    if (capturedLink) {
-                        console.log('[Browserless V2] Returning captured link.');
-                        return { data: capturedLink, type: 'text/plain' };
-                    } else {
-                        console.error('[Browserless V2] Failed to capture link.');
-                        throw new Error('Download link not found automatically on ilide.info.');
-                    }
-                } catch (navError) {
-                    console.error('[Browserless V2] Navigation/processing error:', navError);
-                    throw new Error('Browserless execution failed: ' + navError.message);
+                } catch (error) {
+                    console.error('B2: Navigation/processing error:', error);
+                    navigationError = error;
+                }
+
+                // Check results
+                if (capturedLink) {
+                    console.log('B2: Link captured, returning it.');
+                    return { data: capturedLink, type: 'text/plain' };
+                } else if (navigationError) {
+                    console.error('B2: No link captured & navigation failed.');
+                    throw new Error('Browserless execution failed: ' + navigationError.message);
+                } else {
+                    console.error('B2: Navigation seemingly succeeded but target link response not detected.');
+                    throw new Error('Download link response not detected on ilide.info.');
                 }
             }
         `;
 
-        // 3. Prepare the payload for Browserless
+        // 3. Prepare Browserless Payload
         const apiPayload = {
             code: puppeteerScriptV2,
-            context: { ilideLink: ilideLink }
+            context: {
+                ilideLink: ilideLink,
+                blockScripts: blockScripts
+            }
         };
 
-        // 4. Call the Browserless.io V2 /function endpoint
-        // Use corrected timeout value
-        const browserlessUrl = `https://production-sfo.browserless.io/function?token=${apiKey}&timeout=60000`;
-        console.log(`[API] Sending request to Browserless V2: ${browserlessUrl}`);
-
+        // 4. Call Browserless API
+        const browserlessUrl = `https://${browserlessDomain}/function?token=${apiKey}&timeout=60000`;
+        console.log(`[Vercel Fn] Sending request to ${browserlessUrl}`);
         const browserlessResponse = await fetch(browserlessUrl, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Cache-Control': 'no-cache'
-            },
-            body: JSON.stringify(apiPayload)
+             method: 'POST',
+             headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-cache' },
+             body: JSON.stringify(apiPayload)
         });
+        const responseStatus = browserlessResponse.status;
+        console.log(`[Vercel Fn] Received response from Browserless. Status: ${responseStatus}`);
 
-        console.log(`[API] Received response from Browserless. Status: ${browserlessResponse.status}`);
-
+        // 5. Handle Browserless Response
         if (!browserlessResponse.ok) {
             const errorBody = await browserlessResponse.text();
-            console.error("[API] Browserless Error Body:", errorBody);
+            console.error(`[Vercel Fn] Browserless Error! Status: ${responseStatus}, Body: ${errorBody}`);
             let detail = errorBody;
-             try {
-                 // Check if Browserless returned JSON with error detail
-                 const errorJson = JSON.parse(errorBody);
-                 if (errorJson && errorJson.message) {
-                     detail = errorJson.message; // Use the specific message if available
-                 }
-             } catch(e){}
-            // Send appropriate status code back to frontend
-             const statusCode = browserlessResponse.status === 401 || browserlessResponse.status === 403 ? 500 : 502;
-            return res.status(statusCode).json({ error: `Browserless API Error (${browserlessResponse.status}): ${detail}` });
+            try { detail = JSON.parse(errorBody).message || errorBody; } catch (e) {}
+            const clientStatusCode = [400, 401, 403, 429].includes(responseStatus) ? responseStatus : 502;
+            // Use Vercel's response method
+            return res.status(clientStatusCode).json({ error: `Upstream API Error (${responseStatus}): ${detail}` });
         }
 
-        // 5. Get the result from Browserless
+        // 6. Process Successful Response
         const resultData = await browserlessResponse.json();
-
         if (!resultData || typeof resultData.data !== 'string' || !resultData.data.startsWith('http')) {
-             console.error("[API] Invalid data structure or link from Browserless:", resultData);
-            return res.status(502).json({ error: "Bad Gateway: Received invalid response from downstream service (Browserless)." });
+             console.error("[Vercel Fn] Invalid data structure or link from Browserless:", resultData);
+             // Use Vercel's response method
+            return res.status(502).json({ error: "Bad Gateway: Received invalid response format from upstream service." });
         }
 
+        // 7. Return Link to Frontend (via Netlify proxy)
         const directDownloadLink = resultData.data;
-        console.log("[API] Successfully obtained direct link:", directDownloadLink);
-
-        // 6. Send the successful result back to the frontend
+        console.log("[Vercel Fn] Successfully obtained direct link:", directDownloadLink);
+        // Use Vercel's response method
         return res.status(200).json({ downloadLink: directDownloadLink });
 
     } catch (error) {
-        // Catch errors from parsing, generating link, or unexpected issues
-        console.error("[API] An internal error occurred:", error);
-        // Send a generic 500 Internal Server Error for unexpected issues
-        return res.status(500).json({ error: error.message || 'An internal server error occurred.' });
+        // Catch internal Vercel function errors
+        console.error("[Vercel Fn] Internal error:", error);
+        const statusCode = error.message.includes("Scribd URL format") ? 400 : 500;
+        // Use Vercel's response method
+        return res.status(statusCode).json({ error: error.message || 'An internal server error occurred.' });
     }
 };
