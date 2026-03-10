@@ -35,7 +35,7 @@ function extractScribdInfo(url) {
 }
 
 function generateIlideLink(docId, titleSlug) {
-    const fileUrl = encodeURIComponent(`https://scribd.vdownloaders.com/pdownload/${docId}%2F${titleSlug}`);
+    const fileUrl = encodeURIComponent(`https://scribd.vdownloaders.com/download/${docId}%2F${titleSlug}`);
     const titleWithSpaces = titleSlug.replace(/-/g, ' ');
     const encodedTitle = encodeURIComponent(`<div><p>${titleWithSpaces}</p></div>`);
     return `https://ilide.info/docgeneratev2?fileurl=${fileUrl}&title=${encodedTitle}&utm_source=scrfree&utm_medium=queue&utm_campaign=dl`;
